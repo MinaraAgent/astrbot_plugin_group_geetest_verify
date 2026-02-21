@@ -4,6 +4,8 @@
 
 - 添加了之前忘记写的插件初始化和卸载钩子相关代码 
 
+- 优化配置项，添加命令“设置踢出延迟”
+
 - 在相关命令逻辑后加上 `event.stop_event()` 以便终止事件传播，避免请求 LLM 和执行其它插件的 Handler [#5](https://github.com/VanillaNahida/astrbot_plugin_group_geetest_verify/issues/5)
 
 - 代码格式优化

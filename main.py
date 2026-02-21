@@ -44,6 +44,7 @@ class GroupGeetestVerifyPlugin(Star):
         # 从配置文件读取配置，如果不存在则使用 schema 中的默认值
         try:
             self.verification_timeout = self.config.get("verification_timeout", schema_defaults.get("verification_timeout", 300))
+            self.kick_delay = self.config.get("kick_delay", schema_defaults.get("kick_delay", 5))
             self.max_wrong_answers = self.config.get("max_wrong_answers", schema_defaults.get("max_wrong_answers", 5))
             self.api_base_url = self.config.get("api_base_url", schema_defaults.get("api_base_url", ""))
             self.api_key = self.config.get("api_key", schema_defaults.get("api_key", ""))
@@ -57,6 +58,7 @@ class GroupGeetestVerifyPlugin(Star):
             self.group_configs = self.config.get("group_configs", [])
         except Exception:
             self.verification_timeout = schema_defaults.get("verification_timeout", 300)
+            self.kick_delay = schema_defaults.get("kick_delay", 5)
             self.max_wrong_answers = schema_defaults.get("max_wrong_answers", 5)
             self.api_base_url = schema_defaults.get("api_base_url", "")
             self.api_key = schema_defaults.get("api_key", "")
@@ -71,6 +73,7 @@ class GroupGeetestVerifyPlugin(Star):
         try:
             # 更新配置字典
             self.config["verification_timeout"] = self.verification_timeout
+            self.config["kick_delay"] = self.kick_delay
             self.config["max_wrong_answers"] = self.max_wrong_answers
             self.config["api_base_url"] = self.api_base_url
             self.config["api_key"] = self.api_key
@@ -105,6 +108,7 @@ class GroupGeetestVerifyPlugin(Star):
                 "group_id": gid,
                 "enabled": False,
                 "verification_timeout": self.verification_timeout,
+                "kick_delay": self.kick_delay,
                 "max_wrong_answers": self.max_wrong_answers,
                 "enable_geetest_verify": self.enable_geetest_verify,
                 "enable_level_verify": self.enable_level_verify,
@@ -119,7 +123,7 @@ class GroupGeetestVerifyPlugin(Star):
         
         # 确保配置项完整，如果某些字段缺失，使用默认值填充
         required_fields = ["__template_key", "group_id", "enabled", "verification_timeout", 
-                          "max_wrong_answers", "enable_geetest_verify", "enable_level_verify", 
+                          "kick_delay", "max_wrong_answers", "enable_geetest_verify", "enable_level_verify", 
                           "min_qq_level", "verify_delay"]
         
         for field in required_fields:
@@ -130,6 +134,8 @@ class GroupGeetestVerifyPlugin(Star):
                     group_config[field] = False
                 elif field == "verification_timeout":
                     group_config[field] = self.verification_timeout
+                elif field == "kick_delay":
+                    group_config[field] = self.kick_delay
                 elif field == "max_wrong_answers":
                     group_config[field] = self.max_wrong_answers
                 elif field == "enable_geetest_verify":
@@ -153,6 +159,7 @@ class GroupGeetestVerifyPlugin(Star):
                 return {
                     "enabled": group_config.get("enabled", False),
                     "verification_timeout": group_config.get("verification_timeout", self.verification_timeout),
+                    "kick_delay": group_config.get("kick_delay", self.kick_delay),
                     "max_wrong_answers": group_config.get("max_wrong_answers", self.max_wrong_answers),
                     "enable_geetest_verify": group_config.get("enable_geetest_verify", self.enable_geetest_verify),
                     "enable_level_verify": group_config.get("enable_level_verify", self.enable_level_verify),
@@ -167,6 +174,7 @@ class GroupGeetestVerifyPlugin(Star):
         return {
             "enabled": False,
             "verification_timeout": self.verification_timeout,
+            "kick_delay": self.kick_delay,
             "max_wrong_answers": self.max_wrong_answers,
             "enable_geetest_verify": self.enable_geetest_verify,
             "enable_level_verify": self.enable_level_verify,
@@ -1113,7 +1121,10 @@ class GroupGeetestVerifyPlugin(Star):
 
             at_user = f"[CQ:at,qq={uid}]" if platform == "aiocqhttp" else f"[用户](tg://user?id={uid})"
             
-            failure_msg = f"{at_user} 验证超时，你将在 5 秒后被请出本群。"
+            # 获取配置的踢出延迟
+            kick_delay = group_config.get("kick_delay", self.kick_delay)
+            
+            failure_msg = f"{at_user} 验证超时，你将在 {kick_delay} 秒后被请出本群。"
             if platform == "aiocqhttp":
                 if hasattr(platform_client, "api"):
                     await platform_client.api.call_action("send_group_msg", group_id=gid, message=failure_msg)
@@ -1125,7 +1136,7 @@ class GroupGeetestVerifyPlugin(Star):
                 else:
                     await platform_client.send_message(chat_id=gid, text=failure_msg, parse_mode="Markdown")
             
-            await asyncio.sleep(5)
+            await asyncio.sleep(kick_delay)
 
             if state_key not in self.verify_states:
                 return
@@ -1551,6 +1562,43 @@ class GroupGeetestVerifyPlugin(Star):
         
         event.stop_event()
 
+    @filter.command("设置踢出延迟")
+    async def set_kick_delay_command(self, event: AstrMessageEvent):
+        """设置验证超时后踢出延迟时间"""
+        platform = self._get_platform(event)
+        raw = event.message_obj.raw_message
+        uid = str(event.get_sender_id())
+        
+        # 获取群组 ID
+        gid = self._get_group_id(platform, raw)
+        if gid is None:
+            logger.warning("[Geetest Verify] 无法获取群组 ID，跳过设置踢出延迟命令")
+            return
+        
+        # 检查用户权限
+        if not await self._check_permission(event):
+            at_user = self._format_user_mention(event, uid)
+            await self._send_group_message(event, gid, f"{at_user} 只有群主、管理员或 Bot 管理员才能使用此指令")
+            return
+        
+        # 从消息中提取数字
+        text = event.message_str
+        match = re.search(r'(\d+)', text)
+        if not match:
+            await self._send_group_message(event, gid, "❎ 请输入正确的时间（秒）")
+            return
+        
+        kick_delay = int(match.group(1))
+        
+        # 更新群级别配置
+        self._update_group_config(gid, kick_delay=kick_delay)
+        
+        await self._send_group_message(event, gid, f"✅ 已将本群验证超时后踢出延迟设置为 {kick_delay} 秒")
+        
+        logger.info(f"[Geetest Verify] 群 {gid} 验证超时后踢出延迟设置为 {kick_delay} 秒")
+        
+        event.stop_event()
+
     @filter.command("开启等级验证")
     async def enable_level_verify_command(self, event: AstrMessageEvent):
         """开启等级验证"""
@@ -1792,6 +1840,7 @@ class GroupGeetestVerifyPlugin(Star):
 
 🔹 验证状态：{enabled_status}
 🔹 验证总超时时间：{group_config['verification_timeout']} 秒
+🔹 验证超时后踢出延迟：{group_config.get('kick_delay', 5)} 秒
 🔹 最大错误回答次数：{group_config['max_wrong_answers']} 次
 🔹 极验验证：{'✅ 已启用' if group_config['enable_geetest_verify'] else '❌ 未启用'}
 🔹 入群验证延时：{group_config['verify_delay']} 秒
@@ -1803,6 +1852,7 @@ class GroupGeetestVerifyPlugin(Star):
 
 🔹 验证状态：{enabled_status}
 🔹 验证总超时时间：{group_config['verification_timeout']} 秒
+🔹 验证超时后踢出延迟：{group_config.get('kick_delay', 5)} 秒
 🔹 最大错误回答次数：{group_config['max_wrong_answers']} 次
 🔹 极验验证：{'✅ 已启用' if group_config['enable_geetest_verify'] else '❌ 未启用'}
 🔹 等级验证：{'✅ 已启用' if group_config['enable_level_verify'] else '❌ 未启用'}
